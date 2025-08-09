@@ -63,16 +63,26 @@ function createPullRequest() {
     }
 }
 
-// Merge PR otomatis & hapus branch
+// Merge PR otomatis & hapus branch (dengan fallback auto-merge)
 function mergeAndDeleteBranch() {
     try {
+        console.log('🔄 Mencoba merge langsung...');
         execSync(
-            `gh pr merge --merge --delete-branch --auto`,
+            `gh pr merge --merge --delete-branch`,
             { stdio: 'inherit' }
         );
         console.log('✅ PR berhasil di-merge dan branch dihapus');
     } catch (err) {
-        console.log('⚠️ Gagal merge PR atau PR sudah di-merge sebelumnya.');
+        console.log('⚠️ Merge langsung gagal. Mencoba fallback ke auto-merge...');
+        try {
+            execSync(
+                `gh pr merge --merge --delete-branch --auto`,
+                { stdio: 'inherit' }
+            );
+            console.log('✅ Auto-merge berhasil diaktifkan. PR akan merge setelah semua syarat terpenuhi.');
+        } catch (err2) {
+            console.log('❌ Gagal mengaktifkan auto-merge. Periksa branch protection atau permissions.');
+        }
     }
 }
 
