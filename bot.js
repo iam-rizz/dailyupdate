@@ -16,7 +16,7 @@ function initTracking() {
     if (!fs.existsSync(TRACKING_FILE)) {
         fs.writeFileSync(
             TRACKING_FILE,
-            JSON.stringify({ total_commits: 0, last_commit: null }, null, 2)
+            JSON.stringify({ count: 0, last_commit: null }, null, 2)
         );
     }
 }
@@ -24,7 +24,7 @@ function initTracking() {
 // Update data tracking
 function updateTracking() {
     const tracking = JSON.parse(fs.readFileSync(TRACKING_FILE, 'utf-8'));
-    tracking.total_commits += 1;
+    tracking.count += 1;
     tracking.last_commit = new Date().toISOString();
     fs.writeFileSync(TRACKING_FILE, JSON.stringify(tracking, null, 2));
 }
