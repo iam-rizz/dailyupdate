@@ -1,4 +1,4 @@
-name: Smart Daily Commits (8–15/day)
+name: Smart Daily Commits (8–15/day) (NEW)
 
 on:
   schedule:
