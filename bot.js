@@ -1,4 +1,4 @@
-// Smart Daily Update Bot
+// Smart Daily Update Bot v2.0
 const fs = require('fs');
 const simpleGit = require('simple-git');
 const { execSync } = require('child_process');
@@ -6,13 +6,14 @@ const path = require('path');
 
 const git = simpleGit();
 
-// Konfigurasi
+// Configuration
 const TRACKING_FILE = path.join(__dirname, 'commit_tracking.json');
 const DAILY_FILE = path.join(__dirname, 'daily_update.txt');
-const BRANCH_NAME = 'auto/daily-update';
+const LOCK_FILE = path.join(__dirname, '.bot-lock');
 const BASE_BRANCH = 'main';
+const MAX_LOCK_AGE = 5 * 60 * 1000; // 5 minutes
 
-// Commit messages bervariasi
+// Commit messages
 const commitMessages = [
     "📝 Daily activity update",
     "🔄 Regular maintenance commit",
@@ -36,7 +37,7 @@ const commitMessages = [
     "🏆 Achievement tracking"
 ];
 
-// Aktivitas development
+// Activity types
 const activityTypes = [
     "code review session",
     "feature development",
@@ -52,12 +53,42 @@ const activityTypes = [
     "deployment preparation"
 ];
 
+// Lock mechanism
+function acquireLock() {
+    if (process.env.GITHUB_ACTIONS) return true; // Skip in CI
+
+    try {
+        if (fs.existsSync(LOCK_FILE)) {
+            const lockTime = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'));
+            if (Date.now() - lockTime < MAX_LOCK_AGE) {
+                return false;
+            }
+            fs.unlinkSync(LOCK_FILE);
+        }
+        fs.writeFileSync(LOCK_FILE, Date.now().toString());
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+function releaseLock() {
+    try {
+        if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE);
+    } catch (error) {}
+}
+
+// Helpers
 function getRandomCommitMessage() {
     return commitMessages[Math.floor(Math.random() * commitMessages.length)];
 }
 
 function getRandomActivity() {
     return activityTypes[Math.floor(Math.random() * activityTypes.length)];
+}
+
+function generateBranchName(activity) {
+    return `auto/${activity.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
 }
 
 // Smart frequency control
@@ -73,15 +104,13 @@ function shouldCommitNow() {
         }
     }
 
-    // Reset counter jika hari berbeda
     if (tracking.date !== today) {
         tracking = {
             date: today,
             count: 0,
-            targetCommits: Math.floor(Math.random() * 8) + 8 // Random 8-15
+            targetCommits: Math.floor(Math.random() * 8) + 8 // 8-15
         };
 
-        // Log new day
         const timestamp = new Date().toLocaleString('en-US', {
             timeZone: 'Asia/Jakarta',
             year: 'numeric',
@@ -91,12 +120,8 @@ function shouldCommitNow() {
         fs.appendFileSync(DAILY_FILE, `\n🌅 === NEW DAY: ${timestamp} === Target: ${tracking.targetCommits} commits ===\n\n`);
     }
 
-    // Commit jika belum mencapai target
     const shouldCommit = tracking.count < tracking.targetCommits;
-
-    if (shouldCommit) {
-        tracking.count += 1;
-    }
+    if (shouldCommit) tracking.count += 1;
 
     fs.writeFileSync(TRACKING_FILE, JSON.stringify(tracking, null, 2));
     console.log(`📊 Today's progress: ${tracking.count}/${tracking.targetCommits} commits`);
@@ -104,7 +129,7 @@ function shouldCommitNow() {
     return shouldCommit;
 }
 
-// Logging dengan timestamp WIB
+// Logging
 function addLog(message, type = 'INFO') {
     const timestamp = new Date().toLocaleString('en-US', {
         timeZone: 'Asia/Jakarta',
@@ -122,85 +147,140 @@ function addLog(message, type = 'INFO') {
     console.log(`[${type}] ${message}`);
 }
 
-// Commit & push perubahan
-async function makeCommit() {
-    const commitMessage = getRandomCommitMessage();
-
-    const branches = await git.branchLocal();
-    if (!branches.all.includes(BRANCH_NAME)) {
-        await git.checkoutLocalBranch(BRANCH_NAME);
-    } else {
-        await git.checkout(BRANCH_NAME);
-    }
-
-    await git.add([TRACKING_FILE, DAILY_FILE]);
-    await git.commit(`${commitMessage} - ${new Date().toISOString()}`);
-    await git.push('origin', BRANCH_NAME, { '--force': null });
-    
-    addLog(`Commit & push sukses: ${commitMessage}`, 'COMMIT');
-}
-
-// Buat PR otomatis
-function createPullRequest() {
+// Sync with remote
+async function syncWithRemote() {
     try {
-        execSync(
-            `gh pr create --base ${BASE_BRANCH} --head ${BRANCH_NAME} --title "Daily Update & Progress Tracking" --body "Automated daily update & commit tracking."`,
-            { stdio: 'inherit' }
-        );
-        addLog('PR berhasil dibuat', 'PR');
-    } catch (err) {
-        addLog('PR mungkin sudah ada, atau GitHub CLI belum login', 'PR');
+        await git.fetch();
+        await git.reset(['--hard', `origin/${BASE_BRANCH}`]);
+        addLog('Synced with remote', 'SYNC');
+        return true;
+    } catch (error) {
+        addLog(`Sync failed: ${error.message}`, 'ERROR');
+        return false;
     }
 }
 
-// Merge PR otomatis & hapus branch
-function mergeAndDeleteBranch() {
-    try {
-        console.log('🔄 Mencoba merge langsung...');
-        execSync(`gh pr merge --merge --delete-branch`, { stdio: 'inherit' });
-        addLog('PR berhasil di-merge dan branch dihapus', 'CLEANUP');
-    } catch (err) {
-        console.log('⚠️ Merge langsung gagal. Mencoba fallback ke auto-merge...');
+// Push with retry
+async function pushWithRetry(branchName, maxRetries = 3) {
+    for (let i = 0; i < maxRetries; i++) {
         try {
-            execSync(`gh pr merge --merge --delete-branch --auto`, { stdio: 'inherit' });
-            addLog('Auto-merge diaktifkan', 'CLEANUP');
+            await git.push('origin', branchName, { '--force': null });
+            addLog(`Push successful to ${branchName}`, 'PUSH');
+            return true;
+        } catch (error) {
+            addLog(`Push attempt ${i + 1} failed: ${error.message}`, 'WARNING');
+            if (i < maxRetries - 1) {
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        }
+    }
+    addLog('All push attempts failed', 'ERROR');
+    return false;
+}
+
+// Create PR
+function createPullRequest(branchName, commitMessage, activity) {
+    try {
+        const prTitle = `[Auto] ${commitMessage}`;
+        const prBody = `Automated PR for ${activity}`;
+        execSync(
+            `gh pr create --base ${BASE_BRANCH} --head ${branchName} --title "${prTitle}" --body "${prBody}"`,
+            { stdio: 'pipe' }
+        );
+        addLog('PR created successfully', 'PR');
+        return true;
+    } catch (err) {
+        addLog('PR already exists or creation failed', 'PR');
+        return false;
+    }
+}
+
+// Merge PR
+function mergePullRequest() {
+    try {
+        execSync(`gh pr merge --merge --delete-branch`, { stdio: 'pipe' });
+        addLog('PR merged and branch deleted', 'CLEANUP');
+        return true;
+    } catch (err) {
+        try {
+            execSync(`gh pr merge --merge --delete-branch --auto`, { stdio: 'pipe' });
+            addLog('Auto-merge enabled', 'CLEANUP');
+            return true;
         } catch (err2) {
-            addLog('Gagal mengaktifkan auto-merge', 'ERROR');
+            addLog('Merge failed', 'ERROR');
+            return false;
         }
     }
 }
 
+// Cleanup branch
+async function cleanupBranch(branchName) {
+    try {
+        await git.checkout(BASE_BRANCH);
+        await git.deleteLocalBranch(branchName, true);
+        addLog(`Cleaned up branch: ${branchName}`, 'CLEANUP');
+    } catch (error) {}
+}
+
 // Main execution
-(async () => {
-    // Cek smart frequency dulu
-    if (!shouldCommitNow()) {
-        console.log('⏭️  Skipping - target harian sudah tercapai');
+async function main() {
+    if (!acquireLock()) {
+        console.log('🔒 Another instance is running, skipping...');
         return;
     }
 
-    addLog('Bot execution started', 'SYSTEM');
+    try {
+        if (!shouldCommitNow()) {
+            console.log('⏭️  Skipping - daily target reached');
+            return;
+        }
 
-    // Generate aktivitas
-    const activity = getRandomActivity();
-    addLog(`Started working on: ${activity}`, 'ACTIVITY');
+        addLog('Bot execution started', 'SYSTEM');
 
-    // Progress logs
-    const progressMessages = [
-        '🔍 Analyzing requirements',
-        '⚡ Implementing solution',
-        '🧪 Running tests',
-        '✅ Task completed successfully'
-    ];
-    const numLogs = Math.floor(Math.random() * 3) + 1;
-    for (let i = 0; i < numLogs; i++) {
-        addLog(progressMessages[i], 'PROGRESS');
+        const activity = getRandomActivity();
+        const branchName = generateBranchName(activity);
+        const commitMessage = getRandomCommitMessage();
+
+        addLog(`Working on: ${activity}`, 'ACTIVITY');
+
+        // Sync and create branch
+        await git.checkout(BASE_BRANCH);
+        await syncWithRemote();
+        await git.checkoutLocalBranch(branchName);
+        addLog(`Created branch: ${branchName}`, 'BRANCH');
+
+        // Progress logs
+        const progressMessages = [
+            '🔍 Analyzing requirements',
+            '⚡ Implementing solution',
+            '🧪 Running tests',
+            '✅ Task completed successfully'
+        ];
+        const numLogs = Math.floor(Math.random() * 3) + 1;
+        for (let i = 0; i < numLogs; i++) {
+            addLog(progressMessages[i], 'PROGRESS');
+        }
+
+        // Commit and push
+        await git.add([TRACKING_FILE, DAILY_FILE]);
+        await git.commit(`${commitMessage} - ${new Date().toISOString()}`);
+        addLog(`Committed: ${commitMessage}`, 'COMMIT');
+
+        if (await pushWithRetry(branchName)) {
+            createPullRequest(branchName, commitMessage, activity);
+            await new Promise(r => setTimeout(r, 2000));
+            mergePullRequest();
+        }
+
+        await cleanupBranch(branchName);
+        addLog('Bot execution finished', 'SYSTEM');
+        addLog('─'.repeat(60), 'SEPARATOR');
+
+    } catch (error) {
+        addLog(`Error: ${error.message}`, 'ERROR');
+    } finally {
+        releaseLock();
     }
+}
 
-    // Git operations
-    await makeCommit();
-    createPullRequest();
-    mergeAndDeleteBranch();
-
-    addLog('Bot execution finished', 'SYSTEM');
-    addLog('─'.repeat(60), 'SEPARATOR');
-})();
+main();
