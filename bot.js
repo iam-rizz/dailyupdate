@@ -230,6 +230,10 @@ async function main() {
     }
 
     try {
+        // Sync first before checking tracking
+        await git.checkout(BASE_BRANCH);
+        await syncWithRemote();
+
         if (!shouldCommitNow()) {
             console.log('⏭️  Skipping - daily target reached');
             return;
@@ -243,9 +247,7 @@ async function main() {
 
         addLog(`Working on: ${activity}`, 'ACTIVITY');
 
-        // Sync and create branch
-        await git.checkout(BASE_BRANCH);
-        await syncWithRemote();
+        // Create branch from synced main
         await git.checkoutLocalBranch(branchName);
         addLog(`Created branch: ${branchName}`, 'BRANCH');
 
@@ -261,7 +263,7 @@ async function main() {
             addLog(progressMessages[i], 'PROGRESS');
         }
 
-        // Commit and push
+        // Commit and push (tracking file sudah di-update oleh shouldCommitNow)
         await git.add([TRACKING_FILE, DAILY_FILE]);
         await git.commit(`${commitMessage} - ${new Date().toISOString()}`);
         addLog(`Committed: ${commitMessage}`, 'COMMIT');
